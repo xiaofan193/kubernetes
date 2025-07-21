@@ -393,27 +393,36 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 // ControllerContext defines the context object for controller
 type ControllerContext struct {
 	// ClientBuilder will provide a client for this controller to use
+	// 提供一个用于与 Kubernetes API 交互的客户端。控制器可以使用此客户端执行
 	ClientBuilder clientbuilder.ControllerClientBuilder
 
 	// InformerFactory gives access to informers for the controller.
+	// 提供访问共享的 informer。informer 用于监控 Kubernets API 中的资源变化。通过 informer，
+	//控制器可以获得资源状态的更新，并对其作出反应，保持其内部状态与集群状态的一致性
 	InformerFactory informers.SharedInformerFactory
 
 	// ObjectOrMetadataInformerFactory gives access to informers for typed resources
 	// and dynamic resources by their metadata. All generic controllers currently use
 	// object metadata - if a future controller needs access to the full object this
 	// would become GenericInformerFactory and take a dynamic client.
+	// 提供对某些特定资源的 informer 访问。这些资源可以是类型化的（具有确定类型）或动态的（无需在编译时知道类型，但需要提供资源的 metadata 信息）。
 	ObjectOrMetadataInformerFactory informerfactory.InformerFactory
 
 	// ComponentConfig provides access to init options for a given controller
+	// 提供控制器的初始化选项访问。这个配置一般包含控制器的运行参数，控制器行为的各种布置。
+	//例如，它可能包含控制器的同步周期、并发工作线程数等参数
 	ComponentConfig kubectrlmgrconfig.KubeControllerManagerConfiguration
 
 	// DeferredDiscoveryRESTMapper is a RESTMapper that will defer
 	// initialization of the RESTMapper until the first mapping is
 	// requested.
+	// 这是一个延迟初始化的 RESTMapper，用于在需要时确定资源的 REST 端点。它只有在第一次请求时才初始化 REST 映射，
 	RESTMapper *restmapper.DeferredDiscoveryRESTMapper
 
 	// InformersStarted is closed after all of the controllers have been initialized and are running.  After this point it is safe,
 	// for an individual controller to start the shared informers. Before it is closed, they should not.
+	// 这是一个通道，当所有控制器被初始化并开始运行时将被关闭。使用此通道，控制器可以在信号到达时开始使用共享的 informer。
+	//这管理了控制器之间的启动顺序，保证在开始使用 informer 之前所有控制器都已就绪
 	InformersStarted chan struct{}
 
 	// ResyncPeriod generates a duration each time it is invoked; this is so that
@@ -422,9 +431,12 @@ type ControllerContext struct {
 	ResyncPeriod func() time.Duration
 
 	// ControllerManagerMetrics provides a proxy to set controller manager specific metrics.
+	// 提供一个代理，用于设置与控制器特定的指标
 	ControllerManagerMetrics *controllersmetrics.ControllerManagerMetrics
 
 	// GraphBuilder gives an access to dependencyGraphBuilder which keeps tracks of resources in the cluster
+	//  提供对垃圾收集器依赖图构建的访问。它负责跟踪集群中的资源，以及它们之间的依赖关系。在 Kubernetes 中，
+	//  垃圾收集器用于管理资源的生命周期，确保不再需要的资源得到清理
 	GraphBuilder *garbagecollector.GraphBuilder
 }
 
@@ -520,6 +532,8 @@ func ControllersDisabledByDefault() []string {
 // NewControllerDescriptors is a public map of named controller groups (you can start more than one in an init func)
 // paired to their ControllerDescriptor wrapper object that includes InitFunc.
 // This allows for structured downstream composition and subdivision.
+// 创建全局控制器描述符映射，用于管理 kube-controller-manager 的所有内置控制器。每个控制器通过 ControllerDescriptor
+// 封装其元数据和初始化函数（InitFunc），支持下游模块的结构化组合与扩展
 func NewControllerDescriptors() map[string]*ControllerDescriptor {
 	controllers := map[string]*ControllerDescriptor{}
 	aliases := sets.NewString()
@@ -536,10 +550,11 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 		if _, found := controllers[name]; found {
 			panic(fmt.Sprintf("controller name %q was registered twice", name))
 		}
+		// 校验必须包含 InitFunc
 		if controllerDesc.GetInitFunc() == nil {
 			panic(fmt.Sprintf("controller %q does not have an init function", name))
 		}
-
+		// 别名冲突检查
 		for _, alias := range controllerDesc.GetAliases() {
 			if aliases.Has(alias) {
 				panic(fmt.Sprintf("controller %q has a duplicate alias %q", name, alias))
@@ -556,8 +571,10 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 	// The only known special case is the ServiceAccountTokenController which *must* be started
 	// first to ensure that the SA tokens for future controllers will exist. Think very carefully before adding new
 	// special controllers.
+	// 特殊控制器的优先注册
+	// ServiceAccountTokenController 必须第一个启动，确保后续控制器所需的 ServiceAccount 令牌存在。它被标记为 RequiresSpecialHandling，不参与普通控制器初始化循环
 	register(newServiceAccountTokenControllerDescriptor(nil))
-
+	// 注册内置控制器列表
 	register(newEndpointsControllerDescriptor())
 	register(newEndpointSliceControllerDescriptor())
 	register(newEndpointSliceMirroringControllerDescriptor())
@@ -610,7 +627,7 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 	register(newServiceCIDRsControllerDescriptor())
 	register(newStorageVersionMigratorControllerDescriptor())
 	register(newSELinuxWarningControllerDescriptor())
-
+	// 遍历所有别名，确保未与控制器主名称重复
 	for _, alias := range aliases.UnsortedList() {
 		if _, ok := controllers[alias]; ok {
 			panic(fmt.Sprintf("alias %q conflicts with a controller name", alias))
@@ -673,14 +690,15 @@ func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, roo
 		ResyncPeriod:                    ResyncPeriod(s),
 		ControllerManagerMetrics:        controllersmetrics.NewControllerManagerMetrics(kubeControllerManager),
 	}
-
+	// 垃圾回收收集器初始化
 	if controllerContext.ComponentConfig.GarbageCollectorController.EnableGarbageCollector &&
 		controllerContext.IsControllerEnabled(NewControllerDescriptors()[names.GarbageCollectorController]) {
+		// 构建忽略资源列表
 		ignoredResources := make(map[schema.GroupResource]struct{})
 		for _, r := range controllerContext.ComponentConfig.GarbageCollectorController.GCIgnoredResources {
 			ignoredResources[schema.GroupResource{Group: r.Group, Resource: r.Resource}] = struct{}{}
 		}
-
+		// 创建依赖图谱构建器
 		controllerContext.GraphBuilder = garbagecollector.NewDependencyGraphBuilder(
 			ctx,
 			metadataClient,
@@ -690,7 +708,7 @@ func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, roo
 			controllerContext.InformersStarted,
 		)
 	}
-
+	// 仅当配置启用垃圾回收且控制器未被禁用时初始化。
 	controllersmetrics.Register()
 	return controllerContext, nil
 }
