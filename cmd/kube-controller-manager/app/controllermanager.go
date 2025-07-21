@@ -184,19 +184,25 @@ func ResyncPeriod(c *config.CompletedConfig) func() time.Duration {
 
 // Run runs the KubeControllerManagerOptions.
 func Run(ctx context.Context, c *config.CompletedConfig) error {
-	logger := klog.FromContext(ctx)
-	stopCh := ctx.Done()
+	// 日志与事件初始化
+	logger := klog.FromContext(ctx) // 从Context获取日志记录器[1,3](@ref)
+	stopCh := ctx.Done()            // 创建停止通道，监听Context取消信号[1](@ref)
 
 	// To help debugging, immediately log version
-	logger.Info("Starting", "version", utilversion.Get())
-
+	logger.Info("Starting", "version", utilversion.Get()) // 记录启动版本
+	// 记录Go运行时环境变量（GOGC/GOMAXPROCS等）
 	logger.Info("Golang settings", "GOGC", os.Getenv("GOGC"), "GOMAXPROCS", os.Getenv("GOMAXPROCS"), "GOTRACEBACK", os.Getenv("GOTRACEBACK"))
 
 	// Start events processing pipeline.
-	c.EventBroadcaster.StartStructuredLogging(0)
+	// 事件处理
+	c.EventBroadcaster.StartStructuredLogging(0) // 启动结构化事件日志
+	// 将事件记录到Kubernetes API Server
 	c.EventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: c.Client.CoreV1().Events("")})
+	//   确保退出时关闭事件广播
 	defer c.EventBroadcaster.Shutdown()
 
+	// 配置与健康检查
+	// 注册configz（运行时检查工具）
 	if cfgz, err := configz.New(ConfigzName); err == nil {
 		cfgz.Set(c.ComponentConfig)
 	} else {
@@ -208,16 +214,19 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	var electionChecker *leaderelection.HealthzAdaptor
 	if c.ComponentConfig.Generic.LeaderElection.LeaderElect {
 		electionChecker = leaderelection.NewLeaderHealthzAdaptor(time.Second * 20)
-		checks = append(checks, electionChecker)
+		checks = append(checks, electionChecker) // // 添加领导者选举健康检查
 	}
-	healthzHandler := controllerhealthz.NewMutableHealthzHandler(checks...)
+	healthzHandler := controllerhealthz.NewMutableHealthzHandler(checks...) // 动态健康检查处理器
 
 	// Start the controller manager HTTP server
 	// unsecuredMux is the handler for these controller *after* authn/authz filters have been applied
+	// HTTP服务器启动
 	var unsecuredMux *mux.PathRecorderMux
 	if c.SecureServing != nil {
+		// 创建路由
 		unsecuredMux = genericcontrollermanager.NewBaseHandler(&c.ComponentConfig.Generic.Debugging, healthzHandler)
-		slis.SLIMetricsWithReset{}.Install(unsecuredMux)
+		slis.SLIMetricsWithReset{}.Install(unsecuredMux) // 安装指标端点
+		// 功能门控制的功能安装
 		if utilfeature.DefaultFeatureGate.Enabled(zpagesfeatures.ComponentFlagz) {
 			if c.Flagz != nil {
 				flagz.Install(unsecuredMux, kubeControllerManager, c.Flagz)
@@ -228,44 +237,46 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 			statusz.Install(unsecuredMux, kubeControllerManager, statusz.NewRegistry(c.ComponentGlobalsRegistry.EffectiveVersionFor(basecompatibility.DefaultKubeComponent)))
 		}
 
+		// 添加认证鉴权的中间件
 		handler := genericcontrollermanager.BuildHandlerChain(unsecuredMux, &c.Authorization, &c.Authentication)
 		// TODO: handle stoppedCh and listenerStoppedCh returned by c.SecureServing.Serve
 		if _, _, err := c.SecureServing.Serve(handler, 0, stopCh); err != nil {
 			return err
-		}
+		} //启动 https服务
 	}
 
 	clientBuilder, rootClientBuilder := createClientBuilders(c)
 
 	saTokenControllerDescriptor := newServiceAccountTokenControllerDescriptor(rootClientBuilder)
-
+	// 这是一个控制器运行框架
 	run := func(ctx context.Context, controllerDescriptors map[string]*ControllerDescriptor) {
-		controllerContext, err := CreateControllerContext(ctx, c, rootClientBuilder, clientBuilder)
+		controllerContext, err := CreateControllerContext(ctx, c, rootClientBuilder, clientBuilder) // 创建控制器共享上下文
 		if err != nil {
 			logger.Error(err, "Error building controller context")
 			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 		}
-
+		// 启动所有控制器
 		if err := StartControllers(ctx, controllerContext, controllerDescriptors, unsecuredMux, healthzHandler); err != nil {
 			logger.Error(err, "Error starting controllers")
 			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 		}
 
-		controllerContext.InformerFactory.Start(stopCh)
-		controllerContext.ObjectOrMetadataInformerFactory.Start(stopCh)
+		controllerContext.InformerFactory.Start(stopCh)                 // 启动Informer监听资源变更
+		controllerContext.ObjectOrMetadataInformerFactory.Start(stopCh) // 通知Informers已启动
 		close(controllerContext.InformersStarted)
 
-		<-ctx.Done()
+		<-ctx.Done() // 阻塞等待终止信号
 	}
 
 	// No leader election, run directly
+	// 无领导者选举模式
 	if !c.ComponentConfig.Generic.LeaderElection.LeaderElect {
 		controllerDescriptors := NewControllerDescriptors()
 		controllerDescriptors[names.ServiceAccountTokenController] = saTokenControllerDescriptor
 		run(ctx, controllerDescriptors)
 		return nil
 	}
-
+	// 领导者选举模式
 	id, err := os.Hostname()
 	if err != nil {
 		return err
@@ -280,10 +291,10 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	// If leader migration is enabled, create the LeaderMigrator and prepare for migration
 	if leadermigration.Enabled(&c.ComponentConfig.Generic) {
 		logger.Info("starting leader migration")
-
+		// / 创建迁移器
 		leaderMigrator = leadermigration.NewLeaderMigrator(&c.ComponentConfig.Generic.LeaderMigration,
 			kubeControllerManager)
-
+		// 重写SA Token控制器初始化逻辑
 		// startSATokenControllerInit is the original InitFunc.
 		startSATokenControllerInit := saTokenControllerDescriptor.GetInitFunc()
 
@@ -324,12 +335,13 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	}
 
 	// Start the main lock
+	// 启动迁移锁选举
 	go leaderElectAndRun(ctx, c, id, electionChecker,
 		c.ComponentConfig.Generic.LeaderElection.ResourceLock,
 		c.ComponentConfig.Generic.LeaderElection.ResourceName,
 		leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				controllerDescriptors := NewControllerDescriptors()
+				controllerDescriptors := NewControllerDescriptors() // 仅启动迁移控制器
 				if leaderMigrator != nil {
 					// If leader migration is enabled, we should start only non-migrated controllers
 					//  for the main lock.
@@ -363,6 +375,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 					controllerDescriptors := NewControllerDescriptors()
 					controllerDescriptors = filteredControllerDescriptors(controllerDescriptors, leaderMigrator.FilterFunc, leadermigration.ControllerMigrated)
 					// DO NOT start saTokenController under migration lock
+					// 排除SA Token控制器
 					delete(controllerDescriptors, names.ServiceAccountTokenController)
 					run(ctx, controllerDescriptors)
 				},
@@ -610,44 +623,53 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 // CreateControllerContext creates a context struct containing references to resources needed by the
 // controllers such as the cloud provider and clientBuilder. rootClientBuilder is only used for
 // the shared-informers client and token controller.
+// 创建控制器共享的上下文环境，整合资源（如客户端、Informer、配置等）
+// 参数 s *config.CompletedConfig：已完成的全局配置（如组件配置、API Server 地址）
+// rootClientBuilder/clientBuilder：构建 Kubernetes API 客户端的工具，rootClientBuilder 用于核心资源（如 Informer），clientBuilder 用于普通控制器
 func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, rootClientBuilder, clientBuilder clientbuilder.ControllerClientBuilder) (ControllerContext, error) {
 	// Informer transform to trim ManagedFields for memory efficiency.
+	// 这里就是内存的优化
 	trim := func(obj interface{}) (interface{}, error) {
 		if accessor, err := meta.Accessor(obj); err == nil {
 			if accessor.GetManagedFields() != nil {
-				accessor.SetManagedFields(nil)
+				accessor.SetManagedFields(nil) // 清除 ManagedFields 减少内存占用
 			}
 		}
 		return obj, nil
 	}
-
+	// 初始化Informer 工厂
 	versionedClient := rootClientBuilder.ClientOrDie("shared-informers")
 	sharedInformers := informers.NewSharedInformerFactoryWithOptions(versionedClient, ResyncPeriod(s)(), informers.WithTransform(trim))
-
+	// ResyncPeriod(s) 从配置中读取 Informer 的同步间隔
 	metadataClient := metadata.NewForConfigOrDie(rootClientBuilder.ConfigOrDie("metadata-informers"))
 	metadataInformers := metadatainformer.NewSharedInformerFactoryWithOptions(metadataClient, ResyncPeriod(s)(), metadatainformer.WithTransform(trim))
 
 	// If apiserver is not running we should wait for some time and fail only then. This is particularly
 	// important when we start apiserver and controller manager at the same time.
+	// 控制器启动需依赖 API Server，若同时启动需等待其健康状态
 	if err := genericcontrollermanager.WaitForAPIServer(versionedClient, 10*time.Second); err != nil {
 		return ControllerContext{}, fmt.Errorf("failed to wait for apiserver being healthy: %v", err)
 	}
 
 	// Use a discovery client capable of being refreshed.
+	// 动态资源映射
 	discoveryClient := rootClientBuilder.DiscoveryClientOrDie("controller-discovery")
 	cachedClient := cacheddiscovery.NewMemCacheClient(discoveryClient)
 	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedClient)
+	// RESTMapper：将 Kubernetes 资源类型（如 "pods"）映射到 API 路径（如 /api/v1/pods）
+	// 每30秒 通过 wait.until 重置缓存 确保新注册的CRD能被识别
 	go wait.Until(func() {
 		restMapper.Reset()
 	}, 30*time.Second, ctx.Done())
 
+	// 构建 ControllerContext 结构体
 	controllerContext := ControllerContext{
 		ClientBuilder:                   clientBuilder,
-		InformerFactory:                 sharedInformers,
+		InformerFactory:                 sharedInformers, // 提供资源监听能力。
 		ObjectOrMetadataInformerFactory: informerfactory.NewInformerFactory(sharedInformers, metadataInformers),
 		ComponentConfig:                 s.ComponentConfig,
-		RESTMapper:                      restMapper,
-		InformersStarted:                make(chan struct{}),
+		RESTMapper:                      restMapper,          // 支持资源类型动态发现
+		InformersStarted:                make(chan struct{}), // 通道用于同步 Informer 启动状态
 		ResyncPeriod:                    ResyncPeriod(s),
 		ControllerManagerMetrics:        controllersmetrics.NewControllerManagerMetrics(kubeControllerManager),
 	}
