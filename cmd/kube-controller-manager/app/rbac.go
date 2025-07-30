@@ -24,6 +24,8 @@ import (
 	"k8s.io/kubernetes/pkg/controller/clusterroleaggregation"
 )
 
+// kube-controller-mananger 通过调用 clusterroleaggregation.NewClusterRoleAggregation
+// 来创建 clusterrole-aggregation 控制器（*ClusterRoleAggregationController 类型的实例），并通过调用 Run 方法来启动控制器、、
 func newClusterRoleAggregrationControllerDescriptor() *ControllerDescriptor {
 	return &ControllerDescriptor{
 		name:     names.ClusterRoleAggregationController,

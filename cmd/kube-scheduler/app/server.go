@@ -86,11 +86,17 @@ func init() {
 type Option func(runtime.Registry) error
 
 // NewSchedulerCommand creates a *cobra.Command object with default parameters and registryOptions
+//
+//	NewSchedulerCommand 创建并设置了一个 *cobra.Command 类型的对象，表示一个命令行命令
+//
+// parma registryOptions ...Option：可选的组件注册器配置（用于扩展调度器功能）
+// return 配置完成的 *cobra.Command 对象
 func NewSchedulerCommand(registryOptions ...Option) *cobra.Command {
-	opts := options.NewOptions()
+	opts := options.NewOptions() // 创建默认调度器配置对象
 
 	cmd := &cobra.Command{
-		Use: "kube-scheduler",
+		Use: "kube-scheduler", // 命令名称 kube-scheduler
+		// 帮助文档（显示于 --help 输出）
 		Long: `The Kubernetes scheduler is a control plane process which assigns
 Pods to Nodes. The scheduler determines which Nodes are valid placements for
 each Pod in the scheduling queue according to constraints and available
@@ -99,13 +105,16 @@ suitable Node. Multiple different schedulers may be used within a cluster;
 kube-scheduler is the reference implementation.
 See [scheduling](https://kubernetes.io/docs/concepts/scheduling-eviction/)
 for more information about scheduling and the kube-scheduler component.`,
+		// 在所有子命令前执行，确保特性门控设置完成
 		PersistentPreRunE: func(*cobra.Command, []string) error {
 			// makes sure feature gates are set before RunE.
 			return opts.ComponentGlobalsRegistry.Set()
 		},
+		// 命令执行主逻辑，调用 runCommand 启动调度器
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCommand(cmd, opts, registryOptions...)
 		},
+		// 验证命令参数：禁止非空参数（如 kube-scheduler create 会报错）
 		Args: func(cmd *cobra.Command, args []string) error {
 			for _, arg := range args {
 				if len(arg) > 0 {
@@ -183,6 +192,7 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 	}
 
 	// Start events processing pipeline.
+	// cc.EventBroadcaster 是一个 events.EventBroadcasterAdapter 类型的变量，用来启动事件广播器
 	cc.EventBroadcaster.StartRecordingToSink(ctx.Done())
 	defer cc.EventBroadcaster.Shutdown()
 
@@ -253,7 +263,13 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 			return fmt.Errorf("failed to start secure server: %v", err)
 		}
 	}
-
+	// 启动 Informer，并等待缓存同步完成
+	// InformerFactory：用于创建动态 SharedInformer，可以监视任何 Kubernetes 资源对象，
+	//不需要提前生成对应的 clientset。DynInformerFactory：用于创建针对特定 API 组的
+	//SharedInformer，需要提供对应 API 组的 clientset。
+	// 当 DelayCacheUntilActive 为 true 时，调度器在启动时不会立即填充 informer 缓存，
+	//而会等待成为领导者后再开始填充缓存。当 DelayCacheUntilActive 为 false 时，
+	//调度器在启动时会立即开始填充 informer 缓存。
 	startInformersAndWaitForSync := func(ctx context.Context) {
 		// Start all informers.
 		cc.InformerFactory.Start(ctx.Done())
@@ -281,6 +297,8 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		startInformersAndWaitForSync(ctx)
 	}
 	// If leader election is enabled, runCommand via LeaderElector until done and exit.
+	// 根据选举器的配置，当 kube-scheduler 成为 Leader 后，会重新运行 startInformersAndWaitForSync(ctx)、sched.Run(ctx)
+	//以启动 kube-scheduler 处理逻辑。
 	if cc.LeaderElection != nil {
 		if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CoordinatedLeaderElection) {
 			cc.LeaderElection.Coordinated = true
@@ -312,7 +330,7 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		if err != nil {
 			return fmt.Errorf("couldn't create leader elector: %v", err)
 		}
-
+		// 最后调用 sched.Run(ctx) 运行调度器。调度器运行期间，kube-scheduler 主进程会一直阻塞在 sched.Run(ctx) 函数调用处。
 		leaderElector.Run(ctx)
 
 		return fmt.Errorf("lost lease")
@@ -424,7 +442,8 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 			return nil, nil, err
 		}
 	}
-
+	// 通过以下代码段来启动事件广播器
+	// cc.EventBroadcaster 是一个 events.EventBroadcasterAdapter 类型的变量，用来启动事件广播器。
 	recorderFactory := getRecorderFactory(&cc)
 	completedProfiles := make([]kubeschedulerconfig.KubeSchedulerProfile, 0)
 	// Create the scheduler.

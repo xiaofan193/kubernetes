@@ -83,9 +83,13 @@ func RunNoErrOutput(cmd *cobra.Command) error {
 	return err
 }
 
+// run 是包装 cobra 命令执行的核心函数
+// return logsInitialized 报告是否初始化了日志系统
 func run(cmd *cobra.Command) (logsInitialized bool, err error) {
 	defer logs.FlushLogs()
-
+	// 设置全局的参数标准化函数，用于规范化参数的名称。通过设置全局的参数标准化函数，
+	//可以确保在命令行中使用参数时，不同的参数名称形式（例如使用下划线或连字符）都能被正确识别和处理。
+	//这有助于提高命令行工具的用户友好性和灵活性
 	cmd.SetGlobalNormalizationFunc(cliflag.WordSepNormalizeFunc)
 
 	// When error printing is enabled for the Cobra command, a flag parse
@@ -101,6 +105,9 @@ func run(cmd *cobra.Command) (logsInitialized bool, err error) {
 	//
 	// Some commands, like kubectl, already deal with this themselves.
 	// We don't change the behavior for those.
+	//
+	//检查是否为 Cobra 命令（cmd）启用了错误打印。如果启用了错误打印（cmd.SilenceUsage=false），
+	//首先会打印标志解析错误，然后是可选的通常很长的用法文本。
 	if !cmd.SilenceUsage {
 		cmd.SilenceUsage = true
 		cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -111,6 +118,7 @@ func run(cmd *cobra.Command) (logsInitialized bool, err error) {
 	}
 
 	// In all cases error printing is done below.
+
 	cmd.SilenceErrors = true
 
 	// This is idempotent.
@@ -118,6 +126,9 @@ func run(cmd *cobra.Command) (logsInitialized bool, err error) {
 
 	// Inject logs.InitLogs after command line parsing into one of the
 	// PersistentPre* functions.
+	// 确保在命令执行前完成日志系统初始化
+	// PersistentPreRun、PersistentPreRunE 函数中，进行日志包初始化。通过这些设置，
+	//能够确保在执行 *cobra.Command 任何类型的 Run 函数中，日志均被正确初始化。
 	switch {
 	case cmd.PersistentPreRun != nil:
 		pre := cmd.PersistentPreRun
